@@ -55,7 +55,8 @@ Public:
 
 - `POST /auth/signup`
 - `POST /auth/login`
-- `GET /auth/verify-email?token=...`
+- `POST /auth/verify-email`
+- `POST /auth/refresh`
 - `GET /auth/google/:site/login`
 - `GET /auth/google/:site/callback`
 - `GET /auth/twitter/:site/login`
@@ -171,7 +172,8 @@ Expected login response:
 
 ```json
 {
-  "token": "<jwt>",
+  "access_token": "<jwt-access>",
+  "refresh_token": "<jwt-refresh>",
   "user": {
     "id": "<uuid>",
     "email": "user@example.com"
@@ -179,7 +181,14 @@ Expected login response:
 }
 ```
 
-Store `token` in `localStorage`, a secure cookie, or your app state depending on your frontend architecture.
+Store the tokens securely depending on your frontend architecture.
+When the `access_token` expires, call `/auth/refresh`:
+
+```bash
+curl -X POST https://api.site1.com/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_token":"<jwt-refresh>"}'
+```
 
 ### 2. Social Login Flow
 
@@ -193,17 +202,19 @@ https://api.site1.com/auth/twitter/site1.com/login
 After the provider callback completes, the gateway redirects the browser to:
 
 ```text
-https://site1.com/auth/callback#token=<jwt>&provider=google
+https://site1.com/auth/callback#access_token=<jwt>&refresh_token=<jwt>&provider=google
 ```
 
-On your frontend callback page, read the fragment, save the token, then route the user onward:
+On your frontend callback page, read the fragment, save the tokens, then route the user onward:
 
 ```javascript
 const params = new URLSearchParams(window.location.hash.slice(1));
-const token = params.get("token");
+const accessToken = params.get("access_token");
+const refreshToken = params.get("refresh_token");
 
-if (token) {
-  localStorage.setItem("auth_token", token);
+if (accessToken) {
+  localStorage.setItem("access_token", accessToken);
+  localStorage.setItem("refresh_token", refreshToken);
   window.location.href = "/dashboard";
 }
 ```
@@ -224,12 +235,14 @@ const response = await fetch("https://api.site1.com/auth/me", {
 const profile = await response.json();
 ```
 
-### 4. Verification Links
+### 4. Verification Code (OTP)
 
-Email verification links point back to the site domain so the correct tenant database is resolved from the `Host` header.
+After signup, an email is sent with a numeric verification code. The user enters this code on the frontend. The frontend calls the verification endpoint on the site domain:
 
-```text
-https://site1.com/auth/verify-email?token=<verification-token>
+```bash
+curl -X POST https://api.site1.com/auth/verify-email \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","code":"48291736"}'
 ```
 
 ### 5. Frontend Checklist

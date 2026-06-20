@@ -33,13 +33,21 @@ func SetupRouter(cfg *config.Config, emailSvc *services.EmailService, oauthSvc *
 	{
 		public.POST("/signup",
 			middleware.AuthRateLimit(),
-			handlers.Signup(emailSvc),
+			handlers.Signup(emailSvc, cfg.VerifyCodeLength),
 		)
 		public.POST("/login",
 			middleware.AuthRateLimit(),
-			handlers.Login(cfg.JWTSecret),
+			handlers.Login(cfg),
 		)
-		public.GET("/verify-email", handlers.VerifyEmail())
+		// POST — keeps OTP code out of server logs and browser history.
+		public.POST("/verify-email",
+			middleware.AuthRateLimit(),
+			handlers.VerifyEmail(),
+		)
+		public.POST("/refresh",
+			middleware.AuthRateLimit(),
+			handlers.Refresh(cfg),
+		)
 	}
 
 	// ── OAuth callbacks ───────────────────────────────────────────────────────

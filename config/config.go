@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // SiteDBConfig holds the connection details for one site's isolated database.
@@ -30,6 +32,13 @@ type Config struct {
 	TwitterClientID         string
 	TwitterClientSecret     string
 	Sites                   map[string]SiteDBConfig
+	// VerifyCodeLength is the number of digits in the email verification code.
+	// Configurable via VERIFY_CODE_LENGTH env var (default: 8, range: 4–10).
+	VerifyCodeLength        int
+	// AccessTokenExpiry is the duration the access token is valid for (default 720h = 30 days)
+	AccessTokenExpiry       time.Duration
+	// RefreshTokenExpiry is the duration the refresh token is valid for (default 2160h = 90 days)
+	RefreshTokenExpiry      time.Duration
 }
 
 // Load parses and validates all environment variables required by the gateway.
@@ -93,6 +102,20 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("JWT_SECRET and OAUTH_STATE_SECRET must be different values")
 	}
 
+	verifyCodeLength, err := parseVerifyCodeLength()
+	if err != nil {
+		return nil, err
+	}
+
+	accessTokenExpiry, err := parseDuration("ACCESS_TOKEN_EXPIRY", 30*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	refreshTokenExpiry, err := parseDuration("REFRESH_TOKEN_EXPIRY", 90*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Port:                    getEnv("APP_PORT", "8080"),
 		JWTSecret:               jwtSecret,
@@ -107,9 +130,38 @@ func Load() (*Config, error) {
 		TwitterClientID:         twitterClientID,
 		TwitterClientSecret:     twitterClientSecret,
 		Sites:                   sites,
+		VerifyCodeLength:        verifyCodeLength,
+		AccessTokenExpiry:       accessTokenExpiry,
+		RefreshTokenExpiry:      refreshTokenExpiry,
 	}
 
 	return cfg, nil
+}
+
+// parseVerifyCodeLength reads VERIFY_CODE_LENGTH from env and validates the range.
+func parseVerifyCodeLength() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("VERIFY_CODE_LENGTH"))
+	if raw == "" {
+		return 8, nil // default
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 4 || n > 10 {
+		return 0, fmt.Errorf("VERIFY_CODE_LENGTH must be a number between 4 and 10 (got %q)", raw)
+	}
+	return n, nil
+}
+
+// parseDuration parses a time.Duration from the env.
+func parseDuration(key string, defaultVal time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return defaultVal, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration (e.g. 720h), got %q", key, raw)
+	}
+	return d, nil
 }
 
 func parseAllowSites() ([]string, error) {

@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ─── Request / Response types ─────────────────────────────────────────────────
+// ─── Request types ────────────────────────────────────────────────────────────
 
 type signupRequest struct {
 	Email    string `json:"email"    binding:"required,email"`
@@ -26,6 +26,14 @@ type loginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// verifyEmailRequest accepts the recipient email + OTP code submitted by the user.
+// Requiring email (not just code) prevents brute-force guessing across users.
+type verifyEmailRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Code  string `json:"code"  binding:"required"`
+}
+
+// normalizeInput trims whitespace and rejects null bytes.
 func normalizeInput(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if strings.ContainsRune(value, '\x00') {
@@ -36,12 +44,12 @@ func normalizeInput(value string) (string, error) {
 
 // ─── Signup ───────────────────────────────────────────────────────────────────
 
-// Signup registers a new user with email + password in the site-specific DB.
-// It sends a verification email via Resend before returning.
+// Signup registers a new user with email + password.
+// A numeric OTP code (length from cfg.VerifyCodeLength) is generated, stored,
+// and emailed via the site's "verify_email" template from the DB.
 // POST /auth/signup  (requires SiteResolver middleware)
-func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
+func Signup(emailSvc *services.EmailService, codeLength int) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Enforce JSON content type.
 		if !strings.Contains(c.ContentType(), "application/json") {
 			c.JSON(http.StatusUnsupportedMediaType, gin.H{
 				"error": "Content-Type must be application/json",
@@ -52,15 +60,13 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 
 		var req signupRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": err.Error(),
-				"code":  "VALIDATION_ERROR",
-			})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
 			return
 		}
 
 		db := c.MustGet("db").(*gorm.DB)
 		site := c.GetString("site")
+
 		var err error
 		req.Email, err = normalizeInput(req.Email)
 		if err != nil {
@@ -73,11 +79,14 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 			return
 		}
 		if len(req.Password) > 72 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 72 characters or fewer", "code": "VALIDATION_ERROR"})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "password must be 72 characters or fewer",
+				"code":  "VALIDATION_ERROR",
+			})
 			return
 		}
 
-		// Check for duplicate email in this site's DB.
+		// Duplicate email check within this site's DB.
 		var existing models.User
 		if err := db.Where("email = ?", req.Email).First(&existing).Error; err == nil {
 			c.JSON(http.StatusConflict, gin.H{
@@ -87,7 +96,7 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 			return
 		}
 
-		// Hash password with bcrypt cost 12.
+		// Hash password — bcrypt cost 12.
 		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "code": "INTERNAL_ERROR"})
@@ -95,16 +104,20 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 		}
 		hashStr := string(hash)
 
-		// Generate a one-time email verification token.
-		verifyToken := uuid.NewString()
-		expiry := time.Now().Add(24 * time.Hour)
+		// Generate numeric OTP code of the configured length.
+		code, err := services.GenerateVerifyCode(codeLength)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate verification code", "code": "INTERNAL_ERROR"})
+			return
+		}
+		expiry := time.Now().Add(15 * time.Minute) // OTP expires in 15 minutes
 
 		user := models.User{
 			ID:                uuid.New(),
 			Email:             req.Email,
 			PasswordHash:      &hashStr,
 			IsVerified:        false,
-			VerifyToken:       &verifyToken,
+			VerifyToken:       &code,
 			VerifyTokenExpiry: &expiry,
 		}
 
@@ -113,17 +126,15 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 			return
 		}
 
-		// Send verification email to the site's own host so SiteResolver can
-		// recover the correct tenant DB from the Host header.
-		verifyURL := "https://" + site + "/auth/verify-email?token=" + verifyToken
-		if err := emailSvc.SendVerificationEmail(req.Email, verifyURL); err != nil {
-			// Non-fatal: user was created. They can request a new verification email.
-			// Log but do not surface internal email error to client.
+		// Send OTP email using the site's DB template (falls back to built-in if none set).
+		if err := emailSvc.SendVerificationCode(db, site, req.Email, code); err != nil {
+			// Non-fatal: account is created. User can request resend (future endpoint).
+			// Do not leak internal email error to client.
 			_ = err
 		}
 
 		c.JSON(http.StatusCreated, gin.H{
-			"message": "account created — check your email to verify your address",
+			"message": "account created — check your email for the verification code",
 			"user_id": user.ID,
 		})
 	}
@@ -131,10 +142,10 @@ func Signup(emailSvc *services.EmailService) gin.HandlerFunc {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
-// Login authenticates a user with email + password and returns a signed JWT
+// Login authenticates with email + password and returns a signed JWT pair (access + refresh)
 // containing the site claim for DB routing on subsequent requests.
 // POST /auth/login  (requires SiteResolver middleware)
-func Login(jwtSecret string) gin.HandlerFunc {
+func Login(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !strings.Contains(c.ContentType(), "application/json") {
 			c.JSON(http.StatusUnsupportedMediaType, gin.H{
@@ -146,15 +157,13 @@ func Login(jwtSecret string) gin.HandlerFunc {
 
 		var req loginRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": err.Error(),
-				"code":  "VALIDATION_ERROR",
-			})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
 			return
 		}
 
 		db := c.MustGet("db").(*gorm.DB)
 		site := c.GetString("site")
+
 		var err error
 		req.Email, err = normalizeInput(req.Email)
 		if err != nil {
@@ -167,8 +176,7 @@ func Login(jwtSecret string) gin.HandlerFunc {
 			return
 		}
 
-		// Look up user — return the same generic error whether not found or wrong password
-		// to prevent user enumeration.
+		// Generic error for not-found AND wrong password — prevents user enumeration.
 		var user models.User
 		if err := db.Where("email = ?", req.Email).First(&user).Error; err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -197,21 +205,29 @@ func Login(jwtSecret string) gin.HandlerFunc {
 
 		if !user.IsVerified {
 			c.JSON(http.StatusForbidden, gin.H{
-				"error": "email address not verified — check your inbox",
+				"error": "email not verified — check your inbox for the verification code",
 				"code":  "EMAIL_NOT_VERIFIED",
 			})
 			return
 		}
 
-		// Issue JWT with site claim baked in.
-		token, err := services.GenerateJWT(user.ID, user.Email, site, jwtSecret)
+		// Issue JWT token pair with site claim baked in.
+		accessToken, refreshToken, err := services.GenerateTokenPair(
+			user.ID,
+			user.Email,
+			site,
+			cfg.JWTSecret,
+			cfg.AccessTokenExpiry,
+			cfg.RefreshTokenExpiry,
+		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token", "code": "INTERNAL_ERROR"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate tokens", "code": "INTERNAL_ERROR"})
 			return
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"token": token,
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
 			"user": gin.H{
 				"id":    user.ID,
 				"email": user.Email,
@@ -220,41 +236,82 @@ func Login(jwtSecret string) gin.HandlerFunc {
 	}
 }
 
-// ─── Verify Email ─────────────────────────────────────────────────────────────
+// ─── Verify Email (OTP code) ──────────────────────────────────────────────────
 
-// VerifyEmail processes the email verification link sent during signup.
-// GET /auth/verify-email?token=xxx  (requires SiteResolver middleware)
+// VerifyEmail validates the numeric OTP code submitted by the user after signup.
+//
+// Changed from GET ?token=xxx  →  POST {"email":"...","code":"..."}
+//   - Requiring email prevents brute-force guessing of the code across all users.
+//   - POST keeps the code out of server access logs and browser history.
+//
+// POST /auth/verify-email  (requires SiteResolver middleware)
 func VerifyEmail() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := strings.TrimSpace(c.Query("token"))
-		if token == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "missing token parameter",
-				"code":  "INVALID_TOKEN",
+		if !strings.Contains(c.ContentType(), "application/json") {
+			c.JSON(http.StatusUnsupportedMediaType, gin.H{
+				"error": "Content-Type must be application/json",
+				"code":  "VALIDATION_ERROR",
 			})
+			return
+		}
+
+		var req verifyEmailRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+
+		var err error
+		req.Email, err = normalizeInput(req.Email)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		req.Code, err = normalizeInput(req.Code)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
 			return
 		}
 
 		db := c.MustGet("db").(*gorm.DB)
 
+		// Find user by email in this site's DB.
 		var user models.User
-		if err := db.Where("verify_token = ?", token).First(&user).Error; err != nil {
+		if err := db.Where("email = ?", req.Email).First(&user).Error; err != nil {
+			// Generic message — do not reveal whether email exists.
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "invalid verification token",
+				"error": "invalid email or verification code",
 				"code":  "INVALID_TOKEN",
 			})
 			return
 		}
 
+		if user.IsVerified {
+			c.JSON(http.StatusOK, gin.H{
+				"message": "email already verified — you can log in",
+			})
+			return
+		}
+
+		// Validate stored OTP code.
+		if user.VerifyToken == nil || *user.VerifyToken != req.Code {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid email or verification code",
+				"code":  "INVALID_TOKEN",
+			})
+			return
+		}
+
+		// Check expiry.
 		if user.VerifyTokenExpiry != nil && time.Now().After(*user.VerifyTokenExpiry) {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "verification token has expired — please sign up again",
+				"error": "verification code has expired — please request a new one",
 				"code":  "TOKEN_EXPIRED",
 			})
 			return
 		}
 
-		// Mark user as verified and clear token fields.
+		// Mark verified and clear the OTP fields atomically.
 		if err := db.Model(&user).Updates(map[string]interface{}{
 			"is_verified":         true,
 			"verify_token":        nil,
@@ -273,13 +330,12 @@ func VerifyEmail() gin.HandlerFunc {
 // ─── Me (Protected) ───────────────────────────────────────────────────────────
 
 // Me returns the authenticated user's profile.
-// GET /auth/me  (requires JWTAuth middleware — db and claims come from JWT site claim)
+// GET /auth/me  (requires JWTAuth middleware)
 func Me() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := c.MustGet("claims").(*services.Claims)
 		db := c.MustGet("db").(*gorm.DB)
 
-		// Check if token has been revoked via logout.
 		if services.IsTokenRevoked(claims.ID) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": "token has been revoked",
@@ -315,17 +371,87 @@ func Logout() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := c.MustGet("claims").(*services.Claims)
 
-		var expiresAt time.Time
+		expiresAt := time.Now().Add(7 * 24 * time.Hour)
 		if claims.ExpiresAt != nil {
 			expiresAt = claims.ExpiresAt.Time
-		} else {
-			expiresAt = time.Now().Add(7 * 24 * time.Hour)
 		}
 
 		services.RevokeToken(claims.ID, expiresAt)
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": "logged out successfully",
+		})
+	}
+}
+
+// ─── Refresh Token ────────────────────────────────────────────────────────────
+
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// Refresh validates a refresh token and issues a new access + refresh token pair.
+// The old refresh token is then revoked to prevent reuse.
+// POST /auth/refresh  (requires SiteResolver middleware)
+func Refresh(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req refreshRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+
+		site := c.GetString("site")
+
+		// Parse and validate the refresh token specifically
+		claims, err := services.ValidateRefreshToken(req.RefreshToken, cfg.JWTSecret)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token", "code": "INVALID_TOKEN"})
+			return
+		}
+
+		// Ensure the token's site matches the requested site
+		if claims.Site != site {
+			c.JSON(http.StatusForbidden, gin.H{"error": "token does not belong to this site", "code": "SITE_MISMATCH"})
+			return
+		}
+
+		if services.IsTokenRevoked(claims.ID) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "refresh token has been revoked", "code": "INVALID_TOKEN"})
+			return
+		}
+
+		db := c.MustGet("db").(*gorm.DB)
+		var user models.User
+		if err := db.First(&user, "id = ?", claims.UserID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user no longer exists", "code": "USER_NOT_FOUND"})
+			return
+		}
+
+		// Issue a new token pair
+		accessToken, newRefreshToken, err := services.GenerateTokenPair(
+			user.ID,
+			user.Email,
+			site,
+			cfg.JWTSecret,
+			cfg.AccessTokenExpiry,
+			cfg.RefreshTokenExpiry,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate tokens", "code": "INTERNAL_ERROR"})
+			return
+		}
+
+		// Revoke the old refresh token (Refresh Token Rotation)
+		expiresAt := time.Now().Add(cfg.RefreshTokenExpiry)
+		if claims.ExpiresAt != nil {
+			expiresAt = claims.ExpiresAt.Time
+		}
+		services.RevokeToken(claims.ID, expiresAt)
+
+		c.JSON(http.StatusOK, gin.H{
+			"access_token":  accessToken,
+			"refresh_token": newRefreshToken,
 		})
 	}
 }

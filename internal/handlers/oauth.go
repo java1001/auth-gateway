@@ -32,11 +32,11 @@ func rejectSite(c *gin.Context) {
 	})
 }
 
-func safeRedirectURL(site, token, provider string, cfg *config.Config) (string, error) {
+func safeRedirectURL(site, accessToken, refreshToken, provider string, cfg *config.Config) (string, error) {
 	if !siteAllowed(site, cfg) {
 		return "", fmt.Errorf("redirect target %q is not a registered site", site)
 	}
-	return fmt.Sprintf("https://%s/auth/callback#token=%s&provider=%s", site, token, provider), nil
+	return fmt.Sprintf("https://%s/auth/callback#access_token=%s&refresh_token=%s&provider=%s", site, accessToken, refreshToken, provider), nil
 }
 
 func GoogleLogin(oauthSvc *services.OAuthService, cfg *config.Config) gin.HandlerFunc {
@@ -117,13 +117,20 @@ func GoogleCallback(oauthSvc *services.OAuthService, cfg *config.Config) gin.Han
 			return
 		}
 
-		jwtToken, err := services.GenerateJWT(user.ID, user.Email, site, cfg.JWTSecret)
+		accessToken, refreshToken, err := services.GenerateTokenPair(
+			user.ID,
+			user.Email,
+			site,
+			cfg.JWTSecret,
+			cfg.AccessTokenExpiry,
+			cfg.RefreshTokenExpiry,
+		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token", "code": "INTERNAL_ERROR"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate tokens", "code": "INTERNAL_ERROR"})
 			return
 		}
 
-		redirectURL, err := safeRedirectURL(site, jwtToken, "google", cfg)
+		redirectURL, err := safeRedirectURL(site, accessToken, refreshToken, "google", cfg)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect target", "code": "SITE_NOT_FOUND"})
 			return
@@ -221,13 +228,20 @@ func TwitterCallback(oauthSvc *services.OAuthService, cfg *config.Config) gin.Ha
 			return
 		}
 
-		jwtToken, err := services.GenerateJWT(user.ID, user.Email, site, cfg.JWTSecret)
+		accessToken, refreshToken, err := services.GenerateTokenPair(
+			user.ID,
+			user.Email,
+			site,
+			cfg.JWTSecret,
+			cfg.AccessTokenExpiry,
+			cfg.RefreshTokenExpiry,
+		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token", "code": "INTERNAL_ERROR"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate tokens", "code": "INTERNAL_ERROR"})
 			return
 		}
 
-		redirectURL, err := safeRedirectURL(site, jwtToken, "twitter", cfg)
+		redirectURL, err := safeRedirectURL(site, accessToken, refreshToken, "twitter", cfg)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid redirect target", "code": "SITE_NOT_FOUND"})
 			return
