@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auth-gateway/config"
 	"github.com/auth-gateway/internal/models"
 	"github.com/auth-gateway/internal/services"
 	"github.com/gin-gonic/gin"
