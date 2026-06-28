@@ -155,45 +155,4 @@ func GenerateVerifyCode(length int) (string, error) {
 	return string(digits), nil
 }
 
-// ─── JWT Blocklist (in-memory) ────────────────────────────────────────────────
-
-// blocklist maps jti → expiry time. Entries are purged lazily after they expire.
-// In production, replace with Redis for multi-instance deployments.
-var (
-	blocklist   = make(map[string]time.Time)
-	blocklistMu sync.Mutex
-)
-
-func init() {
-	// Background goroutine prunes expired entries every hour.
-	go func() {
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			blocklistMu.Lock()
-			now := time.Now()
-			for jti, exp := range blocklist {
-				if now.After(exp) {
-					delete(blocklist, jti)
-				}
-			}
-			blocklistMu.Unlock()
-		}
-	}()
-}
-
-// RevokeToken adds a JWT ID (jti) to the blocklist until its natural expiry.
-func RevokeToken(jti string, expiresAt time.Time) {
-	blocklistMu.Lock()
-	defer blocklistMu.Unlock()
-	blocklist[jti] = expiresAt
-}
-
-// IsTokenRevoked returns true if the given jti has been revoked via logout.
-func IsTokenRevoked(jti string) bool {
-	blocklistMu.Lock()
-	defer blocklistMu.Unlock()
-	_, revoked := blocklist[jti]
-	return revoked
-}
 
