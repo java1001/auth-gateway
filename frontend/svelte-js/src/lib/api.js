@@ -3,8 +3,8 @@ import { auth, setAuth, clearAuth } from './store.js';
 import { get } from 'svelte/store';
 import { navigate } from 'svelte-routing';
 
-// This should match the GATEWAY_BASE_URL (or API base path)
-const API_URL = 'http://localhost:8080/auth'; 
+// Fallback to localhost if not defined
+const API_URL = import.meta.env.API_URL || 'http://localhost:8080/auth'; 
 
 const api = axios.create({
   baseURL: API_URL,

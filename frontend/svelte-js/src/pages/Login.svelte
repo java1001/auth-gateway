@@ -31,9 +31,8 @@
 
   const handleSocialLogin = (provider) => {
     const site = window.location.hostname;
-    // Assuming backend is at http://localhost:8080 during dev. 
-    // In prod this would just be /auth/${provider}/${site}/login
-    window.location.href = `http://localhost:8080/auth/${provider}/${site}/login`;
+    const apiUrl = import.meta.env.API_URL.replace('/auth', ''); // Strip '/auth' if it exists since the route is /auth/${provider}/...
+    window.location.href = `${apiUrl}/auth/${provider}/${site}/login`;
   };
 </script>
 
