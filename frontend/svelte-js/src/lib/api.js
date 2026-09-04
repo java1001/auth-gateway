@@ -2,10 +2,9 @@ import axios from 'axios';
 import { auth, setAuth, clearAuth } from './store.js';
 import { get } from 'svelte/store';
 import { navigate } from 'svelte-routing';
+import { API_URL } from './config.js';
 
 // Fallback to localhost if not defined
-const API_URL = import.meta.env.API_URL || 'http://localhost:8080/auth'; 
-
 const api = axios.create({
   baseURL: API_URL,
   headers: {
@@ -43,14 +42,16 @@ const processQueue = (error, token = null) => {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    const originalRequest = error.config;
+    const originalRequest = error.config || {};
+    const isRefreshRequest = originalRequest.url?.includes('/refresh');
 
-    if (error.response && error.response.status === 401 && !originalRequest._retry) {
+    if (error.response && error.response.status === 401 && !originalRequest._retry && !isRefreshRequest) {
       if (isRefreshing) {
         return new Promise(function (resolve, reject) {
           failedQueue.push({ resolve, reject });
         })
           .then((token) => {
+            originalRequest.headers = originalRequest.headers || {};
             originalRequest.headers.Authorization = 'Bearer ' + token;
             return api(originalRequest);
           })
@@ -89,6 +90,7 @@ api.interceptors.response.use(
         });
 
         processQueue(null, newAccessToken);
+        originalRequest.headers = originalRequest.headers || {};
         originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
         
         return api(originalRequest);

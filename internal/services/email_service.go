@@ -16,7 +16,8 @@ type TemplateKey = string
 
 const (
 	// TemplateKeyVerifyEmail is the template used for the OTP verification email.
-	TemplateKeyVerifyEmail TemplateKey = "verify_email"
+	TemplateKeyVerifyEmail   TemplateKey = "verify_email"
+	TemplateKeyPasswordReset TemplateKey = "password_reset"
 )
 
 // EmailService wraps the Resend client and renders templates from the per-site DB.
@@ -45,7 +46,7 @@ func NewEmailService(apiKey, from string) *EmailService {
 // If no template exists for this site+key, a built-in fallback template is used
 // so the service degrades gracefully on first deploy.
 func (s *EmailService) SendVerificationCode(db *gorm.DB, site, to, code string) error {
-	subject, htmlBody, err := s.resolveTemplate(db, site, to, code)
+	subject, htmlBody, err := s.resolveTemplate(db, site, to, code, TemplateKeyVerifyEmail)
 	if err != nil {
 		return fmt.Errorf("resolving email template: %w", err)
 	}
@@ -64,11 +65,26 @@ func (s *EmailService) SendVerificationCode(db *gorm.DB, site, to, code string) 
 	return nil
 }
 
+// SendPasswordResetCode sends a password reset OTP. The caller should return a
+// generic response regardless of whether the email exists.
+func (s *EmailService) SendPasswordResetCode(db *gorm.DB, site, to, code string) error {
+	subject, htmlBody, err := s.resolveTemplate(db, site, to, code, TemplateKeyPasswordReset)
+	if err != nil {
+		return fmt.Errorf("resolving password reset template: %w", err)
+	}
+
+	params := &resend.SendEmailRequest{From: s.from, To: []string{to}, Subject: subject, Html: htmlBody}
+	if _, err := s.client.Emails.SendWithContext(context.Background(), params); err != nil {
+		return fmt.Errorf("sending password reset email to %s: %w", to, err)
+	}
+	return nil
+}
+
 // resolveTemplate fetches the template from the DB for (site, key="verify_email").
 // Falls back to the built-in default if no DB record is found.
-func (s *EmailService) resolveTemplate(db *gorm.DB, site, recipientEmail, code string) (subject, html string, err error) {
+func (s *EmailService) resolveTemplate(db *gorm.DB, site, recipientEmail, code string, key TemplateKey) (subject, html string, err error) {
 	var tmpl models.EmailTemplate
-	dbErr := db.Where("site = ? AND key = ?", site, TemplateKeyVerifyEmail).First(&tmpl).Error
+	dbErr := db.Where("site = ? AND key = ?", site, key).First(&tmpl).Error
 
 	if dbErr != nil && !errors.Is(dbErr, gorm.ErrRecordNotFound) {
 		return "", "", fmt.Errorf("querying email template: %w", dbErr)
@@ -76,8 +92,13 @@ func (s *EmailService) resolveTemplate(db *gorm.DB, site, recipientEmail, code s
 
 	if errors.Is(dbErr, gorm.ErrRecordNotFound) {
 		// No custom template — use the built-in fallback.
-		subject = "Your verification code"
-		html = defaultVerifyTemplate()
+		if key == TemplateKeyPasswordReset {
+			subject = "Your password reset code"
+			html = defaultPasswordResetTemplate()
+		} else {
+			subject = "Your verification code"
+			html = defaultVerifyTemplate()
+		}
 	} else {
 		subject = tmpl.Subject
 		html = tmpl.Content
@@ -92,6 +113,10 @@ func (s *EmailService) resolveTemplate(db *gorm.DB, site, recipientEmail, code s
 	subject = replacer.Replace(subject)
 	html = replacer.Replace(html)
 	return subject, html, nil
+}
+
+func defaultPasswordResetTemplate() string {
+	return `<!doctype html><html><body style="font-family:Arial,sans-serif"><h2>Reset your password</h2><p>Use this code to reset your password:</p><p style="font-size:32px;font-weight:bold;letter-spacing:6px">{{code}}</p><p>This code expires in 15 minutes.</p></body></html>`
 }
 
 // defaultVerifyTemplate returns the built-in HTML fallback used when no DB

@@ -1,9 +1,11 @@
 import { writable } from 'svelte/store';
 
 // Retrieve initial state from localStorage if available
-const storedAccessToken = localStorage.getItem('access_token');
-const storedRefreshToken = localStorage.getItem('refresh_token');
-const storedUser = localStorage.getItem('user');
+const storage = typeof window === 'undefined' ? null : window.localStorage;
+const storedAccessToken = storage?.getItem('access_token') || null;
+const storedRefreshToken = storage?.getItem('refresh_token') || null;
+let storedUser = null;
+try { storedUser = JSON.parse(storage?.getItem('user') || 'null'); } catch { storage?.removeItem('user'); }
 
 export const auth = writable({
   isAuthenticated: !!storedAccessToken,
@@ -14,23 +16,26 @@ export const auth = writable({
 
 // Helper to update store and localStorage
 export const setAuth = (data) => {
-  if (data.accessToken) localStorage.setItem('access_token', data.accessToken);
-  if (data.refreshToken) localStorage.setItem('refresh_token', data.refreshToken);
-  if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
+  const accessToken = data.accessToken ?? storedAccessToken;
+  const refreshToken = data.refreshToken ?? storedRefreshToken;
+  const user = data.user ?? storedUser;
+  if (accessToken) storage?.setItem('access_token', accessToken);
+  if (refreshToken) storage?.setItem('refresh_token', refreshToken);
+  if (user) storage?.setItem('user', JSON.stringify(user));
 
   auth.set({
     isAuthenticated: true,
-    accessToken: data.accessToken,
-    refreshToken: data.refreshToken,
-    user: data.user,
+    accessToken,
+    refreshToken,
+    user,
   });
 };
 
 // Helper to clear auth
 export const clearAuth = () => {
-  localStorage.removeItem('access_token');
-  localStorage.removeItem('refresh_token');
-  localStorage.removeItem('user');
+  storage?.removeItem('access_token');
+  storage?.removeItem('refresh_token');
+  storage?.removeItem('user');
   
   auth.set({
     isAuthenticated: false,

@@ -34,6 +34,16 @@ type verifyEmailRequest struct {
 	Code  string `json:"code"  binding:"required"`
 }
 
+type forgotPasswordRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+type resetPasswordRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Code     string `json:"code" binding:"required"`
+	Password string `json:"password" binding:"required,min=8"`
+}
+
 // normalizeInput trims whitespace and rejects null bytes.
 func normalizeInput(value string) (string, error) {
 	value = strings.TrimSpace(value)
@@ -325,6 +335,91 @@ func VerifyEmail() gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "email verified successfully — you can now log in",
 		})
+	}
+}
+
+// ForgotPassword starts a password reset flow. It intentionally returns the
+// same response for unknown, social-only, and password accounts.
+func ForgotPassword(emailSvc *services.EmailService, codeLength int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.Contains(c.ContentType(), "application/json") {
+			c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "Content-Type must be application/json", "code": "VALIDATION_ERROR"})
+			return
+		}
+		var req forgotPasswordRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		var err error
+		req.Email, err = normalizeInput(req.Email)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		db := c.MustGet("db").(*gorm.DB)
+		var user models.User
+		if db.Where("email = ?", req.Email).First(&user).Error == nil && user.PasswordHash != nil {
+			code, codeErr := services.GenerateVerifyCode(codeLength)
+			if codeErr == nil {
+				expiry := time.Now().Add(15 * time.Minute)
+				if db.Model(&user).Updates(map[string]interface{}{"password_reset_token": code, "password_reset_token_expiry": expiry}).Error == nil {
+					_ = emailSvc.SendPasswordResetCode(db, c.GetString("site"), req.Email, code)
+				}
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "if an account exists, a password reset code has been sent"})
+	}
+}
+
+func ResetPassword() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.Contains(c.ContentType(), "application/json") {
+			c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "Content-Type must be application/json", "code": "VALIDATION_ERROR"})
+			return
+		}
+		var req resetPasswordRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		var err error
+		req.Email, err = normalizeInput(req.Email)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		req.Code, err = normalizeInput(req.Code)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "VALIDATION_ERROR"})
+			return
+		}
+		req.Password, err = normalizeInput(req.Password)
+		if err != nil || len(req.Password) > 72 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid password", "code": "VALIDATION_ERROR"})
+			return
+		}
+		db := c.MustGet("db").(*gorm.DB)
+		var user models.User
+		if db.Where("email = ?", req.Email).First(&user).Error != nil || user.PasswordResetToken == nil || *user.PasswordResetToken != req.Code {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid email or reset code", "code": "INVALID_TOKEN"})
+			return
+		}
+		if user.PasswordResetTokenExpiry == nil || time.Now().After(*user.PasswordResetTokenExpiry) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reset code has expired", "code": "TOKEN_EXPIRED"})
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset password", "code": "INTERNAL_ERROR"})
+			return
+		}
+		hashString := string(hash)
+		if err := db.Model(&user).Updates(map[string]interface{}{"password_hash": hashString, "is_verified": true, "password_reset_token": nil, "password_reset_token_expiry": nil}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset password", "code": "INTERNAL_ERROR"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "password reset successfully — you can now log in"})
 	}
 }
 

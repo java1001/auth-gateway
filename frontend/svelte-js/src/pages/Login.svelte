@@ -2,6 +2,7 @@
   import { Link, navigate } from "svelte-routing";
   import api from "../lib/api";
   import { setAuth } from "../lib/store";
+  import { GATEWAY_URL, SITE_HOST } from "../lib/config";
   import { Mail, Lock, Loader2, ArrowRight } from "@lucide/svelte";
 
   let email = "";
@@ -30,9 +31,7 @@
   };
 
   const handleSocialLogin = (provider) => {
-    const site = window.location.hostname;
-    const apiUrl = import.meta.env.API_URL.replace('/auth', ''); // Strip '/auth' if it exists since the route is /auth/${provider}/...
-    window.location.href = `${apiUrl}/auth/${provider}/${site}/login`;
+    window.location.href = `${GATEWAY_URL}/auth/${provider}/${encodeURIComponent(SITE_HOST)}/login`;
   };
 </script>
 

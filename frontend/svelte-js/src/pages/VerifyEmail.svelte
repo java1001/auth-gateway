@@ -76,7 +76,7 @@
     </div>
 
     <div>
-      <label for="code" class="block text-sm font-medium text-zinc-700">8-Digit Code</label>
+      <label for="code" class="block text-sm font-medium text-zinc-700">Verification code</label>
       <div class="relative mt-2">
         <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-zinc-400">
           <KeyRound size={18} />

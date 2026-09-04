@@ -48,6 +48,14 @@ func SetupRouter(cfg *config.Config, emailSvc *services.EmailService, oauthSvc *
 			middleware.AuthRateLimit(),
 			handlers.Refresh(cfg),
 		)
+		public.POST("/forgot-password",
+			middleware.AuthRateLimit(),
+			handlers.ForgotPassword(emailSvc, cfg.VerifyCodeLength),
+		)
+		public.POST("/reset-password",
+			middleware.AuthRateLimit(),
+			handlers.ResetPassword(),
+		)
 	}
 
 	// ── OAuth callbacks ───────────────────────────────────────────────────────

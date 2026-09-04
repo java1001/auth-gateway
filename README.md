@@ -46,7 +46,7 @@ This command:
 - validates `ALLOW_SITES` against `SITE_*` entries
 - connects to every configured site database, or just the one passed via `--db`
 - ensures the `pgcrypto` extension exists
-- runs `AutoMigrate` for `User` and `OAuthAccount`
+- runs `AutoMigrate` for `User`, `OAuthAccount`, and `EmailTemplate`
 - exits after the tables are ready
 
 ## API
@@ -57,6 +57,8 @@ Public:
 - `POST /auth/login`
 - `POST /auth/verify-email`
 - `POST /auth/refresh`
+- `POST /auth/forgot-password`
+- `POST /auth/reset-password`
 - `GET /auth/google/:site/login`
 - `GET /auth/google/:site/callback`
 - `GET /auth/twitter/:site/login`
@@ -88,7 +90,8 @@ server {
 
     location /auth/ {
         proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
+        # The Host must be the tenant host used by SITE_*_HOST, not api.site1.com.
+        proxy_set_header Host site1.com;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
@@ -224,7 +227,7 @@ if (accessToken) {
 Send the JWT as a Bearer token. The gateway reads the `site` claim and routes to the correct database automatically.
 
 ```javascript
-const token = localStorage.getItem("auth_token");
+const token = localStorage.getItem("access_token");
 
 const response = await fetch("https://api.site1.com/auth/me", {
   headers: {
@@ -252,3 +255,19 @@ curl -X POST https://api.site1.com/auth/verify-email \
 - Handle the callback fragment on `/auth/callback`.
 - Persist the JWT securely and send it in the `Authorization` header.
 - Never send `site` manually from the client; it already lives inside the token.
+
+### 6. Password Reset
+
+Request a code and then submit the code with a new password. The response to the
+first request is deliberately generic so it does not reveal whether an email
+exists.
+
+```bash
+curl -X POST https://api.site1.com/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com"}'
+
+curl -X POST https://api.site1.com/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","code":"48291736","password":"newsecret123"}'
+```
